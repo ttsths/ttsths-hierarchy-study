@@ -215,3 +215,130 @@ if (状态变量 满足 执行条件) {
 
 并发量：同事处理的请求数量，并发量增加延迟也会增加
 
+
+
+## 管程--Monitor
+
+**管程**：指的是管理共享变量以及对共享变量的操作过程，让他们支持并发
+
+**MESA模型**
+
+![屏幕快照 2019-10-20 下午8.36.54.png](http://ww1.sinaimg.cn/large/006zHS9Ngy1g84y4msm73j30ji0n00y9.jpg)
+
+- 条件变量，每个条件变量都对应有一个等待阻塞队列，用于解决线程同步问题
+- 入口等待队列：用于进入管程，
+
+
+
+> 阻塞队列(里面存放**共享数据**)，入队、出队
+>
+> 入队：队列满则等待
+>
+> 出队：队列为空则需要等待出列不为空
+>
+> 入队成功，需要通知条件变量。队列不空对应的等待队列
+>
+> 出队成功，需要通知条件变量。队列不满对应的等待队列
+
+```java
+public class BlockedQueue<T> {
+		final Lock lock = new ReentrantLock();
+		// 条件变量：队列不满
+		final Condition notFull = lock.newCondition();
+		// 条件变量：队列不空
+		final COndition notEmpty = lock.newCondition();
+		
+		// 入队
+		void enq(T x){
+				lock.lock();
+				try{
+					while(队列不满){
+						// 等待队列不满
+						notFull.await();
+					}
+					// 省略入队操作
+					// 入队后，通知可出队
+					notEmpty.signal();
+				}finally{
+					lock.unlock();
+				}
+		}
+		
+		// 出队
+		void deq(){
+				lock.lock();
+				try{
+					while(队列已空){
+						// 等待队列不空
+						notEmpty.await();
+						// 省略出队操作
+						// 出队后通知可入队
+						notFull.singal();
+					}
+				}finally{
+					lock.unlock();
+				}
+		}
+		
+}
+```
+
+
+
+**wait()的正确姿势，需要在while里面调用wait()**
+
+```java
+while(条件不满足){
+	wait()
+}
+```
+
+**MESA**管程模型中，T2通知完T1后，T2还是会接着执行，T1并不会立即执行，仅仅是从条件变量的等待队列进到入口等待队列里面。
+
+**notify()何时可以使用**
+
+尽量使用notifyAll()方法，
+
+
+
+### 线程的生命周期
+
+- (New)初始状态，在Java内被创建，操作系统未真实创建线程
+- (Runnable)可运行状态，分配CPU执行，线程已经创建，
+- (Runnable)运行状态，有空闲CPU，被分配到CPU的线程转换成运行态
+- (Blocked、Waiting、Time_waiting)休眠状态，等待某个事件，进入休眠状态会释放CPU使用权
+- (Terminated)终止状态
+
+> Synchronized:Runnable—>Blocked
+
+**JVM层面并不关心操作系统调度相关的状态**，Java调用阻塞API时，指的是线程在操作系统层面的线程状态
+
+> Runnable—>Waiting
+
+Object.wait()
+
+Thread.join():A.join()主线程会等A线程执行完，此时主线程会进入Waiting状态，当A线程执行完时，切换为Runnable
+
+LockSupport.park():所有JUC下的锁，都是基于LockSupport对象实现。
+
+> Runnable—>Timed_Waiting
+
+Thread.sleep(long millis);
+
+Object.wait(long timeout);
+
+LockSupport.parkNanos(Object blocker,long deadline);
+
+LockSupport.parkUnit(long deadline);
+
+> New—>Runnable
+
+继承Thread对象，重写run()
+
+实现Runnable接口，重写run()
+
+> Runnable—>Terminated
+
+Run()方法结束或者中途遇到异常
+
+Interrupt()
