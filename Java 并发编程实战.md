@@ -344,3 +344,9 @@ LockSupport.parkUnit(long deadline);
 Run()方法结束或者中途遇到异常
 
 Interrupt()
+
+### CPU密集型与IO密集型
+
+CPU:最佳线程数=CPU核数+1
+
+IO:最佳线程数=CPU 核数 * [ 1 +（I/O 耗时 / CPU 耗时）]
