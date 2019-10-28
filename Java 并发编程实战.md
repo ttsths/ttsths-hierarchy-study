@@ -606,7 +606,26 @@ void checkAll(){
 
 CAS：Compare And Swap.
 
-包含三个参数：共享变量的内存地址A、用于比较的值B、和共享变量的新值C
+包含三个参数：共享变量的内存地址A、用于比较的值B、和共享变量的新值C.
+
+JNI(Java Native Interface)是在 Java 和 Native 层（包括但不限于C/C++）相互调用的接口规范。
+
+```java
+unSafe.compareAndSwapInt(this,valueOffset,expect,update)
+```
+
+CAS的问题：ABA
+
+解决方法：添加Version并保证Version是自增的
+
+
+
+锁机制存在的问题：
+
+- 加锁、释放锁会导致上下文切换和调度延时引起性能问题
+- 一个线程持有锁、其他线程会挂起
+
+
 
 ### 原子类概览
 
@@ -614,3 +633,37 @@ CAS：Compare And Swap.
 
 ![原子类.png](http://ww1.sinaimg.cn/large/006zHS9Ngy1g8cultzytqj311u0ia0xu.jpg)
 
+## AbstractQueuedSynchronizer
+
+AQS是构建锁或者其他同步组件的基础框架，Doug Lea期望它能够成为实现大部分同步需求的基础
+
+- Voliate 类型的int 成员变量state 表示同步状态，state > 0 表示已经获取了锁、当state = 0时释放了锁。
+
+  getState()、setState(int newState)、compareAndSetState(int expect,int update)
+
+  tryAcquire(int arg):独占式获取同步状态
+
+  tryRelease(int arg):独占式释放同步状态
+
+  tryAcquireShared(int arg):共享式获取同步状态，返回值>=0表示获取成功
+
+  tryReleaseShared(int arg):共享式释放同步状态
+
+  isHeldExclusively():当前同步器是否在独占式模式下被线程占用
+
+  acquire(int arg):方法为AQS提供的模板方法,独占式获取同步状态，但是该方法对中断不敏感：线程获取同步状态失败加入到CLH同步队列中，后续对线程进行中断操作时，线程不会从同步队列中移除
+
+  addWaiter：如果tryAcquire返回FALSE（获取同步状态失败），则调用该方法将当前线程加入到CLH同步队列尾部
+
+  acquireQueued：当前线程会根据公平性原则来进行阻塞等待（自旋）,直到获取锁为止；并且返回当前线程在等待过程中有没有中断过
+
+- CLH，FIFO双向同步队列，来完成资源获取线程的排队工作
+
+  AQS依赖它完成同步状态的管理，一个Node一个线程，保存线程的引用、状态(waitStatus)、prev、next 
+
+  - enq(Node node) CAS
+  - deq(Node node) CAS
+
+- LockSupport
+
+  >LockSupport是用来创建锁和其他同步类的基本线程阻塞原语
