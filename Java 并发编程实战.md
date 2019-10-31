@@ -637,6 +637,14 @@ CAS的问题：ABA
 
 AQS是构建锁或者其他同步组件的基础框架，Doug Lea期望它能够成为实现大部分同步需求的基础
 
+**AQS里面有三个核心字段：**
+
+`private volatile int state;`
+
+`private transient volatile Node head;`
+
+`private transient volatile Node tail;`
+
 - Voliate 类型的int 成员变量state 表示同步状态，state > 0 表示已经获取了锁、当state = 0时释放了锁。
 
   getState()、setState(int newState)、compareAndSetState(int expect,int update)
@@ -661,9 +669,60 @@ AQS是构建锁或者其他同步组件的基础框架，Doug Lea期望它能够
 
   AQS依赖它完成同步状态的管理，一个Node一个线程，保存线程的引用、状态(waitStatus)、prev、next 
 
-  - enq(Node node) CAS
+  - Node节点属性
+    - ***volatile int waitStatus***;节点的等待状态
+      - CANCELLED = 1；*节点操作因为超时或者对应的线程被interrupt。节点不应该留在此状态，一旦达到此状态将从CHL队列中踢出。*
+      - SIGNAL = -1；*节点的继任节点是（或者将要成为）BLOCKED状态（例如通过LockSupport.park()操作），因此一个节点一旦被释放（解锁）或者取消就需要唤醒（LockSupport.unpack()）它的继任节点。*
+      - CONDITION = -2；*表明节点对应的线程因为不满足一个条件（Condition）而被阻塞。*
+      - 0；*正常状态，新生的非CONDITION节点都是此状态。*
+      - *非负值标识节点不需要被通知（唤醒）。*
+    - ***volatile Node pre***;*此节点的前一个节点。节点的waitStatus依赖于前一个节点的状态。*
+    - ***volatile Node next;****此节点的后一个节点。后一个节点是否被唤醒（uppark()）依赖于当前节点是否被释放。*
+    - ***volatile Thread thread;****节点绑定的线程。*
+    - **Node nextWaiter;***下一个等待条件（Condition）的节点，由于Condition是独占模式，因此这里有一个简单的队列来描述Condition上的线程节点。*
+
+  - enq(Node node) CAS操作，每次比较尾结点是否一致
+
+    ```java
+    do {
+    
+            pred = tail;
+    
+    }while ( !compareAndSet(pred,tail,node) );
+    ```
+
+    
+
   - deq(Node node) CAS
+
+    ```java
+    while (pred.status != RELEASED) ;
+    
+    head  = node;
+    ```
+
+    
 
 - LockSupport
 
   >LockSupport是用来创建锁和其他同步类的基本线程阻塞原语
+
+```java
+/**
+* 在当前线程中使用，导致线程阻塞，参数Object是挂起对象
+由于park()立即返回，所以通常情况下需要在循环中去检测竞争资源来决定是否进行下一次阻塞。park()返回的原因有三：
+
+其他某个线程调用将当前线程作为目标调用 unpark；
+其他某个线程中断当前线程；
+该调用不合逻辑地（即毫无理由地）返回。
+其实第三条就决定了需要循环检测了，类似于通常写的while(checkCondition()){Thread.sleep(time);}类似的功能。
+*/
+LockSupport.park();
+LockSupport.park(Object);
+LockSupport.parkNanos(Object,long);
+LockSupport.parkNanos(long);
+LockSupport.parkUNtil(Object,long);
+LockSupport.parkUntil(long);
+LockSupport.unpark();
+```
+
