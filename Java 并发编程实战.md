@@ -726,3 +726,297 @@ LockSupport.parkUntil(long);
 LockSupport.unpark();
 ```
 
+## Lock
+
+```java
+public void java.util.concurrent.locks.ReentrantLock.lock()
+```
+
+ReentrantLock是可重入锁，内部委托Reentrantlock.Sync.lock()实现。Sync是一个抽象类，有FairSync和NonfairSync两个实现。
+
+***公平锁与非公平只是在入AQS的CLH队列之前有所差别，一旦入队是相同的，都是要按照队列中的先后顺序请求锁***
+
+>1,如果tryAcquire(arg)成功则结束，失败进入2
+>
+>2.创建一个独占节点Node，并且此节点加入CLH队列尾部，进行3
+>
+>3.自旋尝试获取锁、失败根据前一个节点来决定是否挂起(park())，直到成功获取到锁，进行4
+>
+>4.如果当前线程已经被中断过，那么中断当前线程(清除中断位)
+
+### tryAcquire()
+
+AQS存在一个state来描述当先有多少线程持有锁。支持独占和共享。
+
+```java
+/**
+* 公平锁的实现方式
+1. 如果当前锁有其它线程持有，c!=0，进行操作2。否则，如果当前线程在AQS队列头部，则尝试将AQS状态state设为acquires（等于1），成功后将AQS独占线程设为当前线程返回true，否则进行2。这里可以看到compareAndSetState就是使用了CAS操作。
+2。 判断当前线程与AQS的独占线程是否相同，如果相同，那么就将当前状态位加1（这里+1后结果为负数后面会讲，这里暂且不理它），修改状态位，返回true，否则进行3。这里之所以不是将当前状态位设置为1，而是修改为旧值+1呢？这是因为ReentrantLock是可重入锁，同一个线程每持有一次就+1。
+3. 返回false。
+*/
+protected final boolean tryAcquire(int acquires) {
+        final Thread current = Thread.currentThread();
+        int c = getState();
+        if (c == 0) {
+            //isFirst是一个很复杂的逻辑，包括踢出无用的节点等过程
+            if (isFirst(current) &&
+                compareAndSetState(0, acquires)) {
+                setExclusiveOwnerThread(current);
+                return true;
+            }
+        }
+        else if (current == getExclusiveOwnerThread()) {
+            int nextc = c + acquires;
+            if (nextc < 0)
+                throw new Error("Maximum lock count exceeded");
+            setState(nextc);
+            return true;
+        }
+        return false;
+    }
+}
+```
+
+公平锁比非公平锁多了一个判断当前节点是否在队列头，这就保证了请求锁的顺序来决定获取锁的顺序
+
+### addWaitor(mode)
+
+tryAcquire失败意味着加入等待队列，独占锁在Node中意味着条件Condition队列为空。mode：表示的是节点的模式，EXCLUSIVE|SHARED
+
+```java
+private Node addWaiter(Node mode) {
+     Node node = new Node(Thread.currentThread(), mode);
+     // Try the fast path of enq; backup to full enq on failure
+     Node pred = tail;
+     if (pred != null) {
+         node.prev = pred;
+         if (compareAndSetTail(pred, node)) {
+             pred.next = node;
+             return node;
+         }
+     }
+     // 去队列操作，如果为空就创建头节点，然后同事比较节点尾部是否是改变开决定CAS操作是否成功，当且仅当成功后才将不节点的下一个节点指向新节点
+     enq(node);
+     return node;
+}
+```
+
+### acquireQueued(mode, arg)
+
+自旋请求锁，如果可能的话挂起线程，直到得到锁，返回当前线程是否中断过(如果park()过并且中断过的话有一个interrupted中断位)
+
+```java
+final boolean acquireQueued(final Node node, int arg) {
+    try {
+        boolean interrupted = false;
+        for (;;) {
+            final Node p = node.predecessor();
+            // 如果当前节点是头结点，如果第一个节点是DUMP节点也就是傀儡节点，那么第二个节点才是头结点
+            if (p == head && tryAcquire(arg)) {
+                // 将头节点的前任节点清空，并将头结点的线程清空为了更好GC，防止内存泄漏
+                setHead(node);
+                p.next = null; // help GC
+                return interrupted;
+            }
+            //当前节点是否应该park()
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                // 应该park()就挂起当前线程并且返回当前线程的中断位
+                parkAndCheckInterrupt())
+                interrupted = true;
+        }
+    } catch (RuntimeException ex) {
+        cancelAcquire(node);
+        throw ex;
+    }
+}
+
+private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
+    int s = pred.waitStatus;
+    // 当前节点还没有获取锁，当前节点应该被park()
+    if (s < 0) return true;
+    // 
+    if (s > 0) {
+      	// 前一个节点被CANCELLED了，那么前一个节点去掉
+        do {
+            node.prev = pred = pred.prev;
+        } while (pred.waitStatus > 0);
+        pred.next = node;
+    } 
+  	// 修改前一个节点的状态位为SINGAL，表示后面节点等待你处理
+    else compareAndSetWaitStatus(pred, 0, Node.SIGNAL);
+    return false;
+}
+```
+
+### Release/TryRelease 
+
+unlock()操作实际上调用了AQS的release操作，释放持有的锁
+
+```java
+/**
+* 尝试去释放锁，成功，则看队列头结点能否被唤醒，如果可以的唤醒下一个节点(非CANCELED)
+**/
+public final boolean release(int arg) {
+    if (tryRelease(arg)) {
+        Node h = head;
+        if (h != null && h.waitStatus != 0)
+            unparkSuccessor(h);
+        return true;
+    }
+    return false;
+}
+
+/**
+* 判断持有锁的线程是否是当前节点，不是则抛IllegalMonitorStateExeception()
+  减少AQS状态位，如果是0，清空AWS持有锁的独占线程(设NULL)
+*/
+protected final boolean tryRelease(int releases) {
+    int c = getState() - releases;
+    if (Thread.currentThread() != getExclusiveOwnerThread())
+        throw new IllegalMonitorStateException();
+    boolean free = false;
+    if (c == 0) {
+        free = true;
+        setExclusiveOwnerThread(null);
+    }
+    setState(c);
+    return free;
+}
+
+private void unparkSuccessor(Node node) {
+        //此时node是需要释放锁的头结点
+
+        //清空头结点的waitStatus，也就是不再需要锁了
+        compareAndSetWaitStatus(node, Node.SIGNAL, 0);
+
+        //从头结点的下一个节点开始寻找继任节点，当且仅当继任节点的waitStatus<=0才是有效继任节点，否则将这些waitStatus>0（也就是CANCELLED的节点）从AQS队列中剔除  
+       //这里并没有从head->tail开始寻找，而是从tail->head寻找最后一个有效节点。
+       //解释在这里 http://www.blogjava.net/xylz/archive/2010/07/08/325540.html#377512
+
+        Node s = node.next;
+        if (s == null || s.waitStatus > 0) {
+            s = null;
+            for (Node t = tail; t != null && t != node; t = t.prev)
+                if (t.waitStatus <= 0)
+                    s = t;
+        }
+
+        //如果找到一个有效的继任节点，就唤醒此节点线程
+        if (s != null)
+            LockSupport.unpark(s.thread);
+    }
+```
+
+## Condition
+
+条件需要与锁绑定，Lock.newCondition(),一个Lock可以有任意的Condition对象
+
+```java
+// 对应Object.wait()
+void await() throws InterruptedException;
+void awaitUninterruptibly();
+long awaitNanos(long nanosTimeout) throws InterruptedException;
+boolean await(long time, TimeUnit unit) throws InterruptedException;
+boolean awaitUntil(Date deadline) throws InterruptedException;
+// 对用Object.nofity()
+void signal();
+void signalAll();
+
+/**
+* 将当前线程加入Condition锁队列，不同于AQS的CLH队列，这里的队列是FIFO
+  释放锁
+  自旋(while)挂起，直到被唤醒或者超时或者CANCELLED等
+  acquireQueued，并从Condition的FIFO队列中释放
+*/
+public final void await() throws InterruptedException {
+    if (Thread.interrupted())
+        throw new InterruptedException();
+    Node node = addConditionWaiter();
+    int savedState = fullyRelease(node);
+    int interruptMode = 0;
+    while (!isOnSyncQueue(node)) {
+        // 通过LockSupport.park()
+        LockSupport.park(this);
+        if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+            break;
+    }
+    if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
+        interruptMode = REINTERRUPT;
+    if (node.nextWaiter != null)
+        unlinkCancelledWaiters();
+    if (interruptMode != 0)
+        reportInterruptAfterWait(interruptMode);
+}
+
+private void doSignal(Node first) {
+    do {
+        if ( (firstWaiter = first.nextWaiter) == null)
+            lastWaiter = null;
+        first.nextWaiter = null;
+    } while (!transferForSignal(first) &&
+             (first = firstWaiter) != null);
+}
+
+private void doSignalAll(Node first) {
+    lastWaiter = firstWaiter  = null;
+    do {
+        Node next = first.nextWaiter;
+        first.nextWaiter = null;
+        transferForSignal(first);
+        first = next;
+    } while (first != null);
+}
+```
+
+
+
+## ThreadPool
+
+```java
+
+ThreadPoolExecutor(
+  int corePoolSize,
+  int maximumPoolSize,
+  long keepAliveTime,
+  TimeUnit unit,
+  BlockingQueue<Runnable> workQueue,
+  ThreadFactory threadFactory,
+  RejectedExecutionHandler handler) 
+```
+
+- CorePoolSize
+- MaximumPookSize
+- KeepAliveTime & unit
+- workQueue：**强烈建议使用有界队列**
+- ThreadFactory
+- Handler:拒绝策略
+  - CallerRunsPolicy：提交任务的线程自己去执行该任务
+  - AbortPolicy:默认的拒绝策略，throw RejectedExecutionException（**谨慎使用**）
+  - DiscardPolicy: 直接丢=丢弃任务，不会抛出异常
+  - DiscardOldestPolicy:丢弃最老的任务，将新任务加入队列
+
+## Future
+
+```java
+
+// 取消任务
+boolean cancel(
+  boolean mayInterruptIfRunning);
+// 判断任务是否已取消  
+boolean isCancelled();
+// 判断任务是否已结束
+boolean isDone();
+// 获得任务执行结果
+get();
+// 获得任务执行结果，支持超时
+get(long timeout, TimeUnit unit);
+```
+
+- 提交 Runnable 任务 submit(Runnable task) ：这个方法的参数是一个 Runnable 接口，Runnable 接口的 run() 方法是没有返回值的，所以 submit(Runnable task) 这个方法返回的 Future 仅可以用来断言任务已经结束了，类似于 Thread.join()。
+
+- 提交 Callable 任务 submit(Callable task)：这个方法的参数是一个 Callable 接口，它只有一个 call() 方法，并且这个方法是有返回值的，所以这个方法返回的 Future 对象可以通过调用其 get() 方法来获取任务的执行结果。
+
+- 提交 Runnable 任务及结果引用 submit(Runnable task, T result)：这个方法很有意思，假设这个方法返回的 Future 对象是 f，f.get() 的返回值就是传给 submit() 方法的参数 result。
+
+  这个方法该怎么用呢？下面这段示例代码展示了它的经典用法。需要你注意的是 Runnable 接口的实现类 Task 声明了一个有参构造函数 Task(Result r) ，创建 Task 对象的时候传入了 result 对象，这样就能在类 Task 的 run() 方法中对 result 进行各种操作了。result 相当于主线程和子线程之间的桥梁，通过它主子线程可以共享数据。
