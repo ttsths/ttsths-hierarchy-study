@@ -447,7 +447,9 @@ java8里面提供了性能更好，但是功能仅仅是ReadWriteLock的子集.
 
 ## CountDownLatch和CyclicBarrier：让线程步调一致
 
-### CoubtDownLatch实现线程等待，解决一个线程等待多个线程的场景
+### CoubtDownLatch
+
+实现线程等待，解决一个线程等待多个线程的场景（**共享锁**：所有共享锁的线程共享同一个资源，一旦任意一个线程拿到共享资源，那么所有线程都拥有同一份资源，通常情况下共享锁只是一个标识，所有线程等待这个标识是否满足，一旦满足所有线程都被激活）
 
 ```java
 
@@ -461,6 +463,7 @@ while(存在未对账订单){
   // 查询未对账订单
   executor.execute(()-> {
     pos = getPOrders();
+    // 打开闭锁
     latch.countDown();
   });
   // 查询派送单
@@ -477,9 +480,62 @@ while(存在未对账订单){
   // 差异写入差异库
   save(diff);
 }
+
+/**
+* 内部调用了AQS的acquireSharedInterruptibly(1)
+*/
+public final void acquireSharedInterruptibly(int arg) throws InterruptedException {
+    if (Thread.interrupted())
+        throw new InterruptedException();
+    if (tryAcquireShared(arg) < 0)
+        doAcquireSharedInterruptibly(arg);
+}
+public int tryAcquireShared(int acquires) {
+    return getState() == 0? 1 : -1;
+}
+/**
+*1.将当前线程节点以共享模式加入AQS的CLH队列中（相关概念参考这里和这里）。进行2。
+ 2.检查当前节点的前任节点，如果是头结点并且当前闭锁计数为0就将当前节点设置为头结点，唤醒继任节点，返回（结束线程阻塞）。否则进行3。
+ 3.检查线程是否该阻塞，如果应该就阻塞(park)，直到被唤醒（unpark）。重复2。
+ 4.如果2、3有异常就抛出异常（结束线程阻塞）
+*/
+private void doAcquireSharedInterruptibly(int arg)
+    throws InterruptedException {
+    final Node node = addWaiter(Node.SHARED);
+    try {
+        for (;;) {
+            final Node p = node.predecessor();
+            if (p == head) {
+                int r = tryAcquireShared(arg);
+                if (r >= 0) {
+                    setHeadAndPropagate(node, r);
+                    p.next = null; // help GC
+                    return;
+                }
+            }
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                parkAndCheckInterrupt())
+                break;
+        }
+    } catch (RuntimeException ex) {
+        cancelAcquire(node);
+        throw ex;
+    }
+    // Arrive here only if interrupted
+    cancelAcquire(node);
+    throw new InterruptedException();
+}
 ```
 
 ### CyclicBarrier实现线程同步,CycliBarrier是一组线程之间相互等待，计数器可循环利用
+
+- await()方法将挂起线程，直到同组的其它线程执行完毕才能继续
+- await()方法返回线程执行完毕的索引，注意，索引时从任务数-1开始的，也就是第一个执行完成的任务索引为parties-1,最后一个为0，这个parties为总任务数，清单中是cnt+1
+- CyclicBarrier 是可循环的，显然名称说明了这点。在清单1中，每一组任务执行完毕就能够执行下一组任务。
+- 如果屏障操作不依赖于挂起的线程，那么任何线程都可以执行屏障操作。在清单1中可以看到并没有指定那个线程执行50%、30%、0%的操作，而是一组线程（cnt+1）个中任何一个线程只要到达了屏障点都可以执行相应的操作
+- CyclicBarrier 的构造函数允许携带一个任务，这个任务将在0%屏障点执行，它将在await()==0后执行。
+- CyclicBarrier 如果在await时因为中断、失败、超时等原因提前离开了屏障点，那么任务组中的其他任务将立即被中断，以InterruptedException异常离开线程。
+- 所有await()之前的操作都将在屏障点之前运行，也就是CyclicBarrier 的内存一致性效果
 
 ```java
 
@@ -869,7 +925,7 @@ public final boolean release(int arg) {
 
 /**
 * 判断持有锁的线程是否是当前节点，不是则抛IllegalMonitorStateExeception()
-  减少AQS状态位，如果是0，清空AWS持有锁的独占线程(设NULL)
+  减少AQS状态位，如果是0，清空AQS持有锁的独占线程(设NULL)
 */
 protected final boolean tryRelease(int releases) {
     int c = getState() - releases;
@@ -914,6 +970,7 @@ private void unparkSuccessor(Node node) {
 
 ```java
 // 对应Object.wait()
+// 
 void await() throws InterruptedException;
 void awaitUninterruptibly();
 long awaitNanos(long nanosTimeout) throws InterruptedException;
@@ -924,10 +981,10 @@ void signal();
 void signalAll();
 
 /**
-* 将当前线程加入Condition锁队列，不同于AQS的CLH队列，这里的队列是FIFO
-  释放锁
-  自旋(while)挂起，直到被唤醒或者超时或者CANCELLED等
-  acquireQueued，并从Condition的FIFO队列中释放
+* 1.将当前线程加入Condition锁队列，不同于AQS的CLH队列，这里的队列是Condition的FIFO队列
+  2.释放锁
+  3.自旋(while)挂起，直到被唤醒或者超时或者CANCELLED等
+  4.获取锁(acquireQueued)，并将自己从Condition的FIFO队列中释放，已经获取锁
 */
 public final void await() throws InterruptedException {
     if (Thread.interrupted())
@@ -957,7 +1014,9 @@ private void doSignal(Node first) {
     } while (!transferForSignal(first) &&
              (first = firstWaiter) != null);
 }
-
+/**
+* 1.将Condition.await*()中FIFO队列的第一个Node(非CANCELLED状态)唤醒(或者全部唤醒)。只有一个线程能获取到锁，其他没有拿到锁的线程自旋等待
+**/
 private void doSignalAll(Node first) {
     lastWaiter = firstWaiter  = null;
     do {
