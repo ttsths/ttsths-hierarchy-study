@@ -424,9 +424,22 @@ Semaphore与管程的区别：
 
 ## 读多写少-ReadWriteLock
 
-ReentrantReadWriteLock:允许多读，单写，写操作时禁止读共享变量
+ReentrantReadWriteLock:允许多读，单写，写操作时禁止读共享变量。
+
+readLock共享锁/writeLock独占锁 AQS的state字段（描述当前有多少线程持有锁，独占锁通常为0/1）读写锁时，将高16位表示共享锁的数量，低16位表示独占锁的数量。2^16-1=65536
+
+读取锁tryLock()也就是tryReadLock()成功的条件是：没有写入锁或者写入锁是当前线程，并且读线程共享锁数量没有超过65535个。
+
+写入锁tryLock()也就是tryWriteLock()成功的条件是: 没有写入锁或者写入锁是当前线程，并且尝试一次修改state成功。
 
 支持公平与非公平模式（AbstractQueuedSynchronizer）
+
+		- 非公平锁：由于读线程之间没有竞争，写操作时，可能立即获取锁，并会推迟一个或者多个读操作或者写操作。
+		- 公平锁：利用AQS的CLH队列，释放当前锁时，优先为等待时间最长的线程分配锁；
+		- 锁重入：写线程获取写入锁时，读线程可以重入锁（写线程锁释放）
+		- 锁降级：写线程获取写入锁后可以获取读取锁，然后释放写入锁，这样就是读取锁
+		- 锁中断：
+		- 条件变量：写入锁提供条件变量Condition的支持，读取锁不支持
 
 支持Lock接口
 
@@ -434,7 +447,7 @@ ReentrantReadWriteLock:允许多读，单写，写操作时禁止读共享变量
 
 ## StampedLock
 
-java8里面提供了性能更好，但是功能仅仅是ReadWriteLock的子集.
+java8里面提供了性能更好，但是功能仅仅是ReadWriteLock的子集.AQS
 
 - 提供三种锁模式：写锁、悲观读锁、乐观读锁(stamp)
 
@@ -447,7 +460,7 @@ java8里面提供了性能更好，但是功能仅仅是ReadWriteLock的子集.
 
 ## CountDownLatch和CyclicBarrier：让线程步调一致
 
-### CoubtDownLatch
+### CountDownLatch
 
 实现线程等待，解决一个线程等待多个线程的场景（**共享锁**：所有共享锁的线程共享同一个资源，一旦任意一个线程拿到共享资源，那么所有线程都拥有同一份资源，通常情况下共享锁只是一个标识，所有线程等待这个标识是否满足，一旦满足所有线程都被激活）
 
@@ -608,12 +621,16 @@ void checkAll(){
     - 原理
     - 应用场景
 
-  - ConcurrentSkipListMap（Key有序）
+  - ConcurrentSkipListMap（Key有序，TreeMap的线程安全版）
 
     - 数据结构：跳表
     - 原理
     - 应用场景
       - 插入、删除、查询操作的平均时间复制读O(log n)，在对ConcurrentHashMap的性能不满意是，可以尝试ConcurrentSkipListMap
+
+  - Hashtable
+
+  - Properties
 
     | 集合类                | Key          | Value        | 是否线程安全 |
     | --------------------- | ------------ | ------------ | ------------ |
@@ -964,6 +981,49 @@ private void unparkSuccessor(Node node) {
     }
 ```
 
+## ConcurrentHashMap
+
+### API
+
+- V putIfAbsent(K key,V value) 不存在则插入，存在则返回旧值
+- boolean remove(Object key,Object value)  比较hashCode和equals方法可以判断是否是相同的key，
+- boolean replace(K key, V oldVlaue,V newValue) 
+
+### HashMap原理
+
+Entry[],Entry 链表 key和Entry对应的条件hash(key) = e.hash && key.equlas(e.key)
+
+int size,
+
+int threshold, 
+
+float loadFactor 扩容因子越大，链表越长，查找元素循环次数越多
+
+元素映射数组的过程：与（&）效率比取模高
+
+```java
+/**
+* h : key 的hash值
+	length : 数组的长度
+	返回：数组索引
+**/
+static int indexFor(int h, int length){
+	return h & (length -1)
+}
+```
+
+- hash算法的碰撞问题，尽量使数组均匀分布
+
+  hashCode的二次散列
+
+- get操作 hash(key) = e.hash && key.equlas(e.key)
+
+- put操作 先查，存在Entry则修改，否则增加元素到表头
+
+  - 扩容：需要rehash
+
+LinkedHashMap 在Map.Entry的基础上添加了before/after两个双向索引，方便查找，LRU
+
 ## Condition
 
 条件需要与锁绑定，Lock.newCondition(),一个Lock可以有任意的Condition对象
@@ -1079,3 +1139,40 @@ get(long timeout, TimeUnit unit);
 - 提交 Runnable 任务及结果引用 submit(Runnable task, T result)：这个方法很有意思，假设这个方法返回的 Future 对象是 f，f.get() 的返回值就是传给 submit() 方法的参数 result。
 
   这个方法该怎么用呢？下面这段示例代码展示了它的经典用法。需要你注意的是 Runnable 接口的实现类 Task 声明了一个有参构造函数 Task(Result r) ，创建 Task 对象的时候传入了 result 对象，这样就能在类 Task 的 run() 方法中对 result 进行各种操作了。result 相当于主线程和子线程之间的桥梁，通过它主子线程可以共享数据。
+
+## CompletableFuture
+
+```java
+//使用默认线程池
+static CompletableFuture<Void> 
+  runAsync(Runnable runnable)
+static <U> CompletableFuture<U> 
+  supplyAsync(Supplier<U> supplier)
+//可以指定线程池  
+static CompletableFuture<Void> 
+  runAsync(Runnable runnable, Executor executor)
+static <U> CompletableFuture<U> 
+  supplyAsync(Supplier<U> supplier, Executor executor)  
+```
+
+- 串行关系
+  - CompletionStage.thenApply,thenAccept,thenRun，thenCompose
+- 并行关系
+- 聚合关系
+
+## CompletionService 
+
+批量的并行任务
+
+## Fork/Join
+
+分治思想，Fork：主要是将任务分解 Join：复制结果合并
+
+- 分治任务的线程池：ForkJoinPool
+  - Invoke() 提交任务
+  - Submit() 提交任务
+- 分治任务：ForkJoinTask
+  - Abstract Class:ForkJoinTask
+    - fork():异步执行任务
+    - join():阻塞当前线程等待子任务的执行结果
+  - 
